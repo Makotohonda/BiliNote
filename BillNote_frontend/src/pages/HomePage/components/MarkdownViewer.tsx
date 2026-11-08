@@ -26,24 +26,17 @@ import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
 import ChatPanel from '@/pages/HomePage/components/ChatPanel.tsx'
 import VideoBanner from '@/pages/HomePage/components/VideoBanner.tsx'
 
-interface VersionNote {
-  ver_id: string
-  content: string
-  style: string
-  model_name: string
-  created_at?: string
-}
-
 interface MarkdownViewerProps {
-  content: string | VersionNote[]
   status: 'idle' | 'loading' | 'success' | 'failed'
 }
 
 const steps = [
   { label: '解析链接', key: 'PARSING' },
-  { label: '下载音频', key: 'DOWNLOADING' },
+  { label: '下载音视频', key: 'DOWNLOADING' },
   { label: '转写文字', key: 'TRANSCRIBING' },
   { label: '总结内容', key: 'SUMMARIZING' },
+  { label: '整理笔记', key: 'FORMATTING' },
+  { label: '保存笔记', key: 'SAVING' },
   { label: '保存完成', key: 'SUCCESS' },
 ]
 
@@ -324,9 +317,11 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const baseURL = (String(import.meta.env.VITE_API_BASE_URL || '').replace('/api','') || '').replace(/\/$/, '')
   const getCurrentTask = useTaskStore.getState().getCurrentTask
   const currentTask = useTaskStore(state => state.getCurrentTask())
+  const failureMessage = currentTask?.failureMessage || '这条记录没有保存失败详情，请重试查看具体环节。'
   const taskStatus = currentTask?.status || 'PENDING'
   const retryTask = useTaskStore.getState().retryTask
   const isMultiVersion = Array.isArray(currentTask?.markdown)
+  const hasSavedNote = Boolean(currentTask?.markdown?.length)
   const [showTranscribe, setShowTranscribe] = useState(false)
   const [showChat, setShowChat] = useState<false | 'half' | 'full'>(false)
   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
@@ -417,12 +412,13 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   if (status === 'loading') {
     return (
-      <div className="flex h-screen w-full flex-col items-center justify-center space-y-4 text-neutral-500">
+      <div className="flex h-full w-full flex-col items-center justify-center space-y-4 text-neutral-500">
         <StepBar steps={steps} currentStep={taskStatus} />
         <Loading className="h-5 w-5" />
         <div className="text-center text-sm">
           <p className="text-lg font-bold">正在生成笔记，请稍候…</p>
           <p className="mt-2 text-xs text-neutral-500">这可能需要几秒钟时间，取决于视频长度</p>
+          {currentTask?.pollError && <p className="mt-2 text-sm text-destructive" role="status">{currentTask.pollError}</p>}
         </div>
       </div>
     )
@@ -430,7 +426,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   if (status === 'idle') {
     return (
-      <div className="flex h-screen w-full flex-col items-center justify-center space-y-3 text-neutral-500">
+      <div className="flex h-full w-full flex-col items-center justify-center space-y-3 text-neutral-500">
         <Idle />
         <div className="text-center">
           <p className="text-lg font-bold">输入视频链接并点击"生成笔记"</p>
@@ -440,15 +436,15 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     )
   }
 
-  if (status === 'failed' && !isMultiVersion) {
+  if (status === 'failed' && !hasSavedNote) {
     return (
-      <div className="flex h-screen w-full flex-col items-center justify-center gap-4 space-y-3">
+      <div className="flex h-full w-full flex-col items-center justify-center gap-4 space-y-3">
         <Error />
         <div className="text-center">
           <p className="text-lg font-bold text-red-500">笔记生成失败</p>
-          <p className="mt-2 mb-2 text-xs text-red-400">请检查后台或稍后再试</p>
+          <p className="mt-2 mb-2 max-w-md break-words px-3 text-sm text-destructive" role="alert">{failureMessage}</p>
 
-          <Button onClick={() => retryTask(currentTask.id)} size="lg">
+          <Button onClick={() => currentTask && retryTask(currentTask.id)} size="lg">
             重试
           </Button>
         </div>
@@ -457,7 +453,10 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   }
 
   return (
-    <div className="flex h-screen w-full flex-col overflow-hidden">
+    <div className="flex h-full w-full flex-col overflow-hidden">
+      {status === 'failed' && (
+        <p className="mb-2 rounded-md border p-2 text-sm text-destructive" role="alert">{failureMessage}</p>
+      )}
       <MarkdownHeader
         currentTask={currentTask}
         isMultiVersion={isMultiVersion}

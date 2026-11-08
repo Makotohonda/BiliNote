@@ -1,12 +1,14 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import { delete_task, generateNote } from '@/services/note.ts'
+import type { GenerateNoteRequest } from '@/services/note.ts'
 import { v4 as uuidv4 } from 'uuid'
 import toast from 'react-hot-toast'
 import { get, set, del } from 'idb-keyval'
 
 
-export type TaskStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILD'
+export type TaskStatus = 'PENDING' | 'RUNNING' | 'PARSING' | 'CONFIGURING_MODEL' | 'DOWNLOADING'
+  | 'TRANSCRIBING' | 'SUMMARIZING' | 'FORMATTING' | 'SAVING' | 'SUCCESS' | 'FAILED' | 'FAILD'
 
 export interface AudioMeta {
   cover_url: string
@@ -16,6 +18,7 @@ export interface AudioMeta {
   raw_info: any
   title: string
   video_id: string
+  playback_url?: string | null
 }
 
 export interface Segment {
@@ -40,32 +43,27 @@ export interface Markdown {
 
 export interface Task {
   id: string
+  platform: string
   markdown: string|Markdown [] //为了兼容之前的笔记
   transcript: Transcript
   status: TaskStatus
+  failureMessage?: string
+  pollError?: string
   audioMeta: AudioMeta
   createdAt: string
-  formData: {
-    video_url: string
-    link: undefined | boolean
-    screenshot: undefined | boolean
-    platform: string
-    quality: string
-    model_name: string
-    provider_id: string
-  }
+  formData: GenerateNoteRequest
 }
 
 interface TaskStore {
   tasks: Task[]
   currentTaskId: string | null
-  addPendingTask: (taskId: string, platform: string) => void
+  addPendingTask: (taskId: string, platform: string, formData: GenerateNoteRequest) => void
   updateTaskContent: (id: string, data: Partial<Omit<Task, 'id' | 'createdAt'>>) => void
   removeTask: (id: string) => void
   clearTasks: () => void
   setCurrentTask: (taskId: string | null) => void
   getCurrentTask: () => Task | null
-  retryTask: (id: string) => void
+  retryTask: (id: string, payload?: GenerateNoteRequest) => Promise<void>
 }
 
 export const useTaskStore = create<TaskStore>()(
@@ -74,7 +72,7 @@ export const useTaskStore = create<TaskStore>()(
       tasks: [],
       currentTaskId: null,
 
-      addPendingTask: (taskId: string, platform: string, formData: any) =>
+      addPendingTask: (taskId, platform, formData) =>
 
         set(state => ({
           tasks: [
@@ -158,7 +156,7 @@ export const useTaskStore = create<TaskStore>()(
         const currentTaskId = get().currentTaskId
         return get().tasks.find(task => task.id === currentTaskId) || null
       },
-      retryTask: async (id: string, payload?: any) => {
+      retryTask: async (id, payload) => {
 
         if (!id){
           toast.error('任务不存在')
@@ -180,12 +178,12 @@ export const useTaskStore = create<TaskStore>()(
           if (e?.data?.reason === 'transcriber_model_not_ready') {
             toast.error(
               e?.data?.downloading
-                ? '转写模型正在下载中，请稍候再重试'
-                : '转写模型尚未下载，请先去「设置 → 音频转写配置」页下载',
+                ? '准备音频转写：模型正在下载，请稍候再重试。'
+                : '准备音频转写：请先在「设置 → 音频转写配置」下载模型。',
             )
             return
           }
-          console.error('重试任务失败：', e)
+          toast.error(`重新提交任务失败：${e?.msg || '请检查 BiliNote 后端是否可访问。'}`)
           return
         }
 
@@ -196,6 +194,8 @@ export const useTaskStore = create<TaskStore>()(
                     ...t,
                     formData: newFormData, // ✅ 显式更新 formData
                     status: 'PENDING',
+                    failureMessage: undefined,
+                    pollError: undefined,
                   }
                   : t
           ),

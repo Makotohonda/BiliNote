@@ -47,9 +47,8 @@ class Downloader(ABC):
         '''
         pass
 
-    @staticmethod
     def download_video(self, video_url: str,
-                       output_dir: Union[str, None] = None) -> str:
+                       output_dir: Union[str, None] = None, metadata: dict | None = None) -> str:
         pass
 
     def download_subtitles(self, video_url: str, output_dir: str = None,

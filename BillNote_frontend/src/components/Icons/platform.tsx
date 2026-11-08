@@ -1,3 +1,10 @@
+export const XiaohongshuLogo = () => (
+  <svg viewBox="0 0 24 24" width="100%" height="100%" aria-hidden="true">
+    <rect x="1" y="1" width="22" height="22" rx="5" fill="#ff2442" />
+    <text x="12" y="16" textAnchor="middle" fontSize="12" fontWeight="700" fill="white">红</text>
+  </svg>
+)
+
 export const KuaishouLogo = () => {
   return (
     <svg

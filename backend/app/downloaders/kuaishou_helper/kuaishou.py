@@ -45,6 +45,9 @@ class KuaiShou:
         return url[0]
 
     def get_photo_id(self, url):
+        direct = re.fullmatch(r"https?://(?:www\.)?kuaishou\.com/short-video/([\w-]+)/?(?:[?#].*)?", url)
+        if direct:
+            return direct[1]
         response = requests.get(url, allow_redirects=True, headers=self.header)
         real_url = response.url
         # 提取short—video/后面的id
@@ -54,7 +57,6 @@ class KuaiShou:
 
     def get_temp_cookies(self):
         is_exist = cfm.get('kuaishou')
-        print(is_exist)
         if is_exist:
             return is_exist
         res = requests.get(url=KUAISHOU_URL, headers=self.header, allow_redirects=True)

@@ -2,7 +2,7 @@ from pydantic import AnyUrl, validator, BaseModel, field_validator, model_valida
 import re
 from urllib.parse import urlparse
 
-from app.utils.url_parser import normalize_video_url
+from app.utils.url_parser import is_xiaohongshu_video_url, normalize_video_url
 
 SUPPORTED_PLATFORMS = {
     "bilibili": r"(https?://)?(www\.)?bilibili\.com/video/[a-zA-Z0-9]+",
@@ -16,7 +16,7 @@ def is_supported_video_url(url: str) -> bool:
     parsed = urlparse(url)
 
     # 检查是否为Bilibili的短链接
-    if parsed.netloc == "b23.tv":
+    if parsed.netloc == "b23.tv" or is_xiaohongshu_video_url(url):
         return True
 
     for name, pattern in SUPPORTED_PLATFORMS.items():

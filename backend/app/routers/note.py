@@ -1,6 +1,8 @@
 # app/routers/note.py
 import json
+import mimetypes
 import os
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -15,12 +17,14 @@ from app.enmus.exception import NoteErrorEnum
 from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
 from app.services.note import NoteGenerator, logger
+from app.services.downloaded_video import downloaded_video_path, normalize_download_link, prepare_downloaded_video
 from app.services.task_serial_executor import task_serial_executor
 from app.utils.response import ResponseWrapper as R
-from app.utils.url_parser import extract_video_id, normalize_video_url
+from app.utils.task_failure import describe_task_failure
+from app.utils.url_parser import is_xiaohongshu_video_url, normalize_video_url
 from app.validators.video_url_validator import is_supported_video_url
 from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 import httpx
 from app.enmus.task_status_enums import TaskStatus
 
@@ -60,8 +64,14 @@ class VideoRequest(BaseModel):
     def normalize_url(cls, data):
         # 稍后再看/收藏夹/带追踪参数的 B 站链接先规范化成标准 /video/BVxxx 形式，
         # 后续校验和 yt-dlp 下载拿到的都是干净链接
-        if isinstance(data, dict) and data.get("platform") == "bilibili" and data.get("video_url"):
-            data["video_url"] = normalize_video_url(str(data["video_url"]))
+        if isinstance(data, dict):
+            platform = data.get("platform")
+            url = str(data.get("video_url") or "")
+            if platform == "bilibili" and url:
+                data["video_url"] = normalize_video_url(url)
+            elif platform == "xiaohongshu" and not is_xiaohongshu_video_url(url):
+                raise NoteError(code=NoteErrorEnum.PLATFORM_NOT_SUPPORTED.code,
+                                message="请输入小红书视频页链接或分享短链")
         return data
 
     @field_validator("video_url")
@@ -83,8 +93,15 @@ UPLOAD_DIR = "uploads"
 
 def save_note_to_file(task_id: str, note):
     os.makedirs(NOTE_OUTPUT_DIR, exist_ok=True)
-    with open(os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json"), "w", encoding="utf-8") as f:
-        json.dump(asdict(note), f, ensure_ascii=False, indent=2)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=NOTE_OUTPUT_DIR, delete=False) as f:
+            temp_path = Path(f.name)
+            json.dump(asdict(note), f, ensure_ascii=False, indent=2)
+        temp_path.replace(Path(NOTE_OUTPUT_DIR) / f"{task_id}.json")
+    finally:
+        if temp_path:
+            temp_path.unlink(missing_ok=True)
 
 
 def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
@@ -127,9 +144,6 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
                   video_interval=0, grid_size=[]
                   ):
 
-    if not model_name or not provider_id:
-        raise HTTPException(status_code=400, detail="请选择模型和提供者")
-
     def _execute_note_task():
         return NoteGenerator().generate(
             video_url=video_url,
@@ -149,12 +163,21 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
         )
 
     logger.info(f"任务进入执行队列 (task_id={task_id})")
-    note = task_serial_executor.run(_execute_note_task)
-    logger.info(f"Note generated: {task_id}")
-    if not note or not note.markdown:
+    try:
+        note = task_serial_executor.run(_execute_note_task)
+    except Exception as exc:
+        NoteGenerator._handle_exception(task_id, TaskStatus.PARSING, exc)
+        return
+    if not note:
         logger.warning(f"任务 {task_id} 执行失败，跳过保存")
         return
-    save_note_to_file(task_id, note)
+    try:
+        save_note_to_file(task_id, note)
+        NoteGenerator._update_status(task_id, TaskStatus.SUCCESS)
+        logger.info("笔记生成成功 (task_id=%s)", task_id)
+    except Exception as exc:
+        NoteGenerator._handle_exception(task_id, TaskStatus.SAVING, exc)
+        return
 
     # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
     try:
@@ -186,8 +209,51 @@ async def upload(file: UploadFile = File(...)):
     return R.success({"url": f"/uploads/{file.filename}"})
 
 
+@router.get("/annotation_video/{filename}", response_class=FileResponse)
+def annotation_video(filename: str):
+    uploads = Path(UPLOAD_DIR).resolve()
+    video = (uploads / filename).resolve()
+    media_type, _ = mimetypes.guess_type(filename)
+    if video.parent != uploads or not video.is_file() or not (media_type or "").startswith("video/"):
+        raise HTTPException(status_code=404, detail="找不到可播放的视频")
+    return FileResponse(video, media_type=media_type, headers={"X-Content-Type-Options": "nosniff"})
+
+
+class AnnotationDownloadRequest(BaseModel):
+    video_url: str
+    platform: Optional[str] = None
+
+
+@router.post("/annotation_video/download")
+def download_annotation_video(data: AnnotationDownloadRequest):
+    try:
+        url, platform = normalize_download_link(data.video_url, data.platform)
+    except ValueError:
+        return R.error(msg="无法识别视频链接。请使用支持的视频平台和可播放的分享链接。", code=400)
+    try:
+        video = prepare_downloaded_video(url, platform)
+        return R.success(data={"playback_url": video.playback_url, "title": video.title})
+    except Exception as exc:
+        logger.exception("批注视频下载失败")
+        return R.error(msg=describe_task_failure(TaskStatus.DOWNLOADING, exc))
+
+
+@router.get("/downloaded_video/{key}.mp4", response_class=FileResponse)
+def play_downloaded_video(key: str):
+    try:
+        video = downloaded_video_path(key)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="找不到已下载的视频")
+    if not video.is_file():
+        raise HTTPException(status_code=404, detail="找不到已下载的视频")
+    return FileResponse(video, media_type="video/mp4", headers={"X-Content-Type-Options": "nosniff"})
+
+
 @router.post("/generate_note")
 def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
+    if not data.model_name.strip() or not data.provider_id.strip():
+        return R.error(msg="请选择 AI 模型和供应商。", code=400)
+
     try:
         # 就绪门禁：本地转写引擎（fast-whisper / mlx-whisper）必须等模型下载完才能跑视频，
         # 否则任务会卡在首次下载（慢 / OOM / 截断），用户只看到一个静默失败的任务。
@@ -208,15 +274,6 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                     },
                 )
 
-        video_id = extract_video_id(data.video_url, data.platform)
-        # if not video_id:
-        #     raise HTTPException(status_code=400, detail="无法提取视频 ID")
-        # existing = get_task_by_video(video_id, data.platform)
-        # if existing:
-        #     return R.error(
-        #         msg='笔记已生成，请勿重复发起',
-        #
-        #     )
         if data.task_id:
             # 如果传了task_id，说明是重试！
             task_id = data.task_id
@@ -226,7 +283,7 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
             task_id = str(uuid.uuid4())
 
         # 统一先写入 PENDING，表示已进入队列等待串行执行
-        NoteGenerator()._update_status(task_id, TaskStatus.PENDING)
+        NoteGenerator._update_status(task_id, TaskStatus.PENDING)
 
         # 客户端已经抓好字幕的话，写到转写缓存文件，NoteGenerator 的 cache-hit 逻辑会直接用上
         if data.prefetched_transcript:
@@ -239,8 +296,9 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                                   data.screenshot, data.model_name, data.provider_id, data.format, data.style,
                                   data.extras, data.video_understanding, data.video_interval, data.grid_size)
         return R.success({"task_id": task_id})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("笔记任务提交失败")
+        return R.error(msg="后端无法创建任务，请检查笔记目录的写入权限和磁盘空间。")
 
 
 @router.get("/task_status/{task_id}")
@@ -276,7 +334,14 @@ def get_task_status(task_id: str):
                 })
 
         if status == TaskStatus.FAILED.value:
-            return R.error(message or "任务失败", code=500)
+            failed_stage = status_content.get("failed_stage")
+            if not failed_stage or not message:
+                message = "这条历史记录没有失败环节，请重试以获取详细提示。"
+            return R.error(message, code=500, data={
+                "status": status,
+                "failed_stage": failed_stage,
+                "task_id": task_id,
+            })
 
         # 处理中状态
         return R.success({

@@ -4,6 +4,7 @@ import enum
 class TaskStatus(str, enum.Enum):
     PENDING = "PENDING"
     PARSING = "PARSING"
+    CONFIGURING_MODEL = "CONFIGURING_MODEL"
     DOWNLOADING = "DOWNLOADING"
     TRANSCRIBING = "TRANSCRIBING"
     SUMMARIZING = "SUMMARIZING"
@@ -17,6 +18,7 @@ class TaskStatus(str, enum.Enum):
         desc_map = {
             cls.PENDING: "排队中",
             cls.PARSING: "解析链接",
+            cls.CONFIGURING_MODEL: "配置 AI 模型",
             cls.DOWNLOADING: "下载中",
             cls.TRANSCRIBING: "转录中",
             cls.SUMMARIZING: "总结中",

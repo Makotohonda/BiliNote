@@ -28,12 +28,14 @@ from app.models.model_config import ModelConfig
 from app.models.notes_model import AudioDownloadResult, NoteResult
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.services.constant import SUPPORT_PLATFORM_MAP
+from app.services.downloaded_video import extract_downloaded_audio, prepare_downloaded_video
 from app.services.provider import ProviderService
 from app.transcriber.base import Transcriber
 from app.transcriber.transcriber_provider import get_transcriber, _transcribers
 from app.utils.note_helper import replace_content_markers, prepend_source_link
 from app.utils.screenshot_marker import extract_screenshot_timestamps
 from app.utils.status_code import StatusCode
+from app.utils.task_failure import describe_task_failure
 from app.utils.video_helper import generate_screenshot
 from app.utils.video_reader import VideoReader
 
@@ -71,7 +73,6 @@ class NoteGenerator:
         self.model_size: str = config_manager.get_whisper_model_size()
         self.device: Optional[str] = None
         self.transcriber_type: str = config_manager.get_transcriber_type()
-        self.transcriber: Transcriber = self._init_transcriber()
         self.video_path: Optional[Path] = None
         self.video_img_urls=[]
         logger.info("NoteGenerator 初始化完成")
@@ -120,6 +121,7 @@ class NoteGenerator:
         if grid_size is None:
             grid_size = []
 
+        stage = TaskStatus.PARSING
         try:
             logger.info(f"开始生成笔记 (task_id={task_id})")
             self._update_status(task_id, TaskStatus.PARSING)
@@ -127,6 +129,7 @@ class NoteGenerator:
             # 获取下载器与 GPT 实例
 
             downloader = self._get_downloader(platform)
+            stage = TaskStatus.CONFIGURING_MODEL
             gpt = self._get_gpt(model_name, provider_id)
 
             # 缓存文件路径
@@ -169,10 +172,8 @@ class NoteGenerator:
                     logger.warning(f"获取平台字幕失败: {e}，将下载音频后转写")
                     transcript = None
 
-            # 2. 下载音频/视频
-            # 有字幕时只提取元信息，不下载音视频文件（除非需要截图/视频理解）
-            has_transcript = transcript is not None
-            need_full_download = not has_transcript or screenshot or video_understanding
+            # 2. 保留本地视频，有字幕时无需另外提取音频。
+            stage = TaskStatus.DOWNLOADING
             audio_meta = self._download_media(
                 downloader=downloader,
                 video_url=video_url,
@@ -185,11 +186,12 @@ class NoteGenerator:
                 video_understanding=video_understanding,
                 video_interval=video_interval,
                 grid_size=grid_size,
-                skip_download=not need_full_download,
+                has_subtitles=transcript is not None,
             )
 
             # 3. 如果前面没拿到字幕，走转写流程
             if transcript is None:
+                stage = TaskStatus.TRANSCRIBING
                 transcript = self._get_transcript(
                     downloader=downloader,
                     video_url=video_url,
@@ -198,8 +200,12 @@ class NoteGenerator:
                     status_phase=TaskStatus.TRANSCRIBING,
                     task_id=task_id,
                 )
+                if transcript is None:
+                    raise RuntimeError("转写器未返回结果")
 
             # 3. GPT 总结
+            stage = TaskStatus.SUMMARIZING
+            self._update_status(task_id, stage)
             markdown = self._summarize_text(
                 audio_meta=audio_meta,
                 transcript=transcript,
@@ -212,8 +218,12 @@ class NoteGenerator:
                 extras=extras,
                 video_img_urls=self.video_img_urls,
             )
+            if not markdown or not markdown.strip():
+                raise RuntimeError("AI 模型未返回笔记内容")
 
             # 4. 截图 & 链接替换
+            stage = TaskStatus.FORMATTING
+            self._update_status(task_id, stage)
             if _format:
                 markdown = self._post_process_markdown(
                     markdown=markdown,
@@ -226,17 +236,14 @@ class NoteGenerator:
             markdown = prepend_source_link(markdown, str(video_url))
 
             # 5. 保存记录到数据库
-            self._update_status(task_id, TaskStatus.SAVING)
+            stage = TaskStatus.SAVING
+            self._update_status(task_id, stage)
             self._save_metadata(video_id=audio_meta.video_id, platform=platform, task_id=task_id)
 
-            # 6. 完成
-            self._update_status(task_id, TaskStatus.SUCCESS)
-            logger.info(f"笔记生成成功 (task_id={task_id})")
             return NoteResult(markdown=markdown, transcript=transcript, audio_meta=audio_meta)
 
         except Exception as exc:
-            logger.error(f"生成笔记流程异常 (task_id={task_id})：{exc}", exc_info=True)
-            self._update_status(task_id, TaskStatus.FAILED, message=str(exc))
+            self._handle_exception(task_id, stage, exc)
             return None
 
     @staticmethod
@@ -311,7 +318,9 @@ class NoteGenerator:
         logger.info(f"使用下载器：{downloader_cls.__class__}")
         return instance
 
-    def _update_status(self, task_id: Optional[str], status: Union[str, TaskStatus], message: Optional[str] = None):
+    @staticmethod
+    def _update_status(task_id: Optional[str], status: Union[str, TaskStatus], message: Optional[str] = None,
+                       failed_stage: Optional[TaskStatus] = None):
         """
         创建或更新 {task_id}.status.json，记录当前任务状态
 
@@ -328,6 +337,8 @@ class NoteGenerator:
         data = {"status": status.value if isinstance(status, TaskStatus) else status}
         if message:
             data["message"] = message
+        if failed_stage is not None:
+            data["failed_stage"] = failed_stage.value
 
         try:
             # First create a temporary file
@@ -350,15 +361,12 @@ class NoteGenerator:
             except:
                 logger.error(f"写入错误  {e}")
 
-    def _handle_exception(self, task_id, exc):
-        logger.error(f"任务异常 (task_id={task_id})", exc_info=True)
-        error_message = getattr(exc, 'detail', str(exc))
-        if isinstance(error_message, dict):
-            try:
-                error_message = json.dumps(error_message, ensure_ascii=False)
-            except:
-                error_message = str(error_message)
-        self._update_status(task_id, TaskStatus.FAILED, message=error_message)
+    @staticmethod
+    def _handle_exception(task_id, stage: TaskStatus, exc: Exception):
+        logger.error("任务异常 (task_id=%s, stage=%s)", task_id, stage.value, exc_info=True)
+        NoteGenerator._update_status(
+            task_id, TaskStatus.FAILED, message=describe_task_failure(stage, exc), failed_stage=stage,
+        )
 
     def _download_media(
         self,
@@ -373,12 +381,10 @@ class NoteGenerator:
         video_understanding: bool,
         video_interval: int,
         grid_size: List[int],
-        skip_download: bool = False,
+        has_subtitles: bool = False,
     ) -> AudioDownloadResult | None:
         """
-        1. 检查音频缓存；若不存在，则根据需要下载音频或视频（若需截图/可视化）。
-        2. 如果需要视频，则先下载视频并生成缩略图集，再下载音频。
-        3. 返回 AudioDownloadResult
+        保留视频副本，按需提取音频或视频帧。
 
         :param downloader: Downloader 实例
         :param video_url: 视频/音频链接
@@ -396,80 +402,43 @@ class NoteGenerator:
         task_id = audio_cache_file.stem.split("_")[0]
         self._update_status(task_id, status_phase)
 
-        # 已有缓存，尝试加载
-        if audio_cache_file.exists():
+        audio = None
+        if platform == "local" and audio_cache_file.exists():
             logger.info(f"检测到音频缓存 ({audio_cache_file})，直接读取")
             try:
                 data = json.loads(audio_cache_file.read_text(encoding="utf-8"))
-                return AudioDownloadResult(**data)
+                cached = AudioDownloadResult(**data)
+                if cached.file_path and Path(cached.file_path).is_file():
+                    audio = cached
             except Exception as e:
                 logger.warning(f"读取音频缓存失败，将重新下载：{e}")
 
-        # 有字幕且不需要截图/视频理解时，只提取元信息不下载文件
-        if skip_download:
-            logger.info("已有字幕，仅提取视频元信息（不下载音视频）")
-            try:
-                audio = downloader.download(
-                    video_url=video_url,
-                    quality=quality,
-                    output_dir=output_path,
-                    need_video=False,
-                    skip_download=True,
+        if platform == "local":
+            self.video_path = Path(downloader.download_video(str(video_url)))
+            if audio is None:
+                audio = downloader.download(video_url=str(video_url), quality=quality, output_dir=output_path)
+        else:
+            audio = prepare_downloaded_video(str(video_url), platform)
+            self.video_path = Path(audio.video_path)
+            if not has_subtitles:
+                audio.file_path = extract_downloaded_audio(
+                    audio.video_path, quality, Path(output_path or audio_cache_file.parent), task_id,
                 )
-                audio_cache_file.write_text(
-                    json.dumps(asdict(audio), ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                logger.info(f"元信息提取完成 ({audio_cache_file})")
-                return audio
-            except Exception as exc:
-                logger.warning(f"元信息提取失败，将尝试完整下载: {exc}")
 
-        # 判断是否需要下载视频
-        need_video = screenshot or video_understanding
-        if screenshot and not grid_size:
-            grid_size = [2, 2]
+        if screenshot or video_understanding:
+            if not grid_size:
+                grid_size = [2, 2]
+            self.video_img_urls = VideoReader(
+                video_path=str(self.video_path),
+                grid_size=tuple(grid_size),
+                frame_interval=video_interval if video_interval and video_interval > 0 else 6,
+                unit_width=960,
+                unit_height=540,
+                save_quality=80,
+            ).run()
 
-        frame_interval = video_interval if video_interval and video_interval > 0 else 6
-        if need_video:
-            try:
-                logger.info("开始下载视频")
-                video_path_str = downloader.download_video(video_url)
-                self.video_path = Path(video_path_str)
-                logger.info(f"视频下载完成：{self.video_path}")
-
-                if grid_size:
-                    self.video_img_urls = VideoReader(
-                        video_path=str(self.video_path),
-                        grid_size=tuple(grid_size),
-                        frame_interval=frame_interval,
-                        unit_width=960,
-                        unit_height=540,
-                        save_quality=80,
-                    ).run()
-                else:
-                    logger.info("未指定 grid_size，跳过缩略图生成")
-            except Exception as exc:
-                logger.error(f"视频下载失败：{exc}")
-                self._handle_exception(task_id, exc)
-                raise
-
-        # 下载音频
-        try:
-            logger.info("开始下载音频")
-            audio = downloader.download(
-                video_url=video_url,
-                quality=quality,
-                output_dir=output_path,
-                need_video=need_video,
-            )
-            audio_cache_file.write_text(json.dumps(asdict(audio), ensure_ascii=False, indent=2), encoding="utf-8")
-            logger.info(f"音频下载并缓存成功 ({audio_cache_file})")
-            return audio
-        except Exception as exc:
-            logger.error(f"音频下载失败：{exc}")
-            self._handle_exception(task_id, exc)
-            raise
+        audio_cache_file.write_text(json.dumps(asdict(audio), ensure_ascii=False, indent=2), encoding="utf-8")
+        return audio
 
 
     def _get_transcript(
@@ -559,13 +528,12 @@ class NoteGenerator:
         # 调用转写器
         try:
             logger.info("开始转写音频")
-            transcript = self.transcriber.transcript(file_path=audio_file)
+            transcript = self._init_transcriber().transcript(file_path=audio_file)
             transcript_cache_file.write_text(json.dumps(asdict(transcript), ensure_ascii=False, indent=2), encoding="utf-8")
             logger.info(f"转写并缓存成功 ({transcript_cache_file})")
             return transcript
         except Exception as exc:
             logger.error(f"音频转写失败：{exc}")
-            self._handle_exception(task_id, exc)
             raise
 
     def _summarize_text(
@@ -596,7 +564,6 @@ class NoteGenerator:
         :return: 生成的 Markdown 字符串
         """
         task_id = markdown_cache_file.stem
-        self._update_status(task_id, TaskStatus.SUMMARIZING)
 
         source = GPTSource(
             title=audio_meta.title,
@@ -618,7 +585,6 @@ class NoteGenerator:
             return markdown
         except Exception as exc:
             logger.error(f"GPT 总结失败：{exc}")
-            self._handle_exception(task_id, exc)
             raise
 
     def _post_process_markdown(

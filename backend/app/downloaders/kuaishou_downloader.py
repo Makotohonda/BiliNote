@@ -87,9 +87,29 @@ class KuaiShouDownloader(Downloader, ABC):
             self,
             video_url: str,
             output_dir: Union[str, None] = None,
+        metadata: dict | None = None,
     ) -> str:
-        print('self.download(video_url, output_dir).video_path',self.download(video_url, output_dir).video_path)
-        return self.download(video_url, output_dir).video_path
+        output_dir = output_dir or get_data_dir()
+        os.makedirs(output_dir, exist_ok=True)
+        info = KuaiShou().run(video_url)
+        detail = info["visionVideoDetail"]
+        photo = detail["photo"]
+        path = os.path.join(output_dir, f"{photo['id']}.mp4")
+        if not os.path.isfile(path):
+            with requests.get(photo["photoUrl"], stream=True, timeout=30) as response:
+                response.raise_for_status()
+                with open(path, "wb") as file:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        file.write(chunk)
+        if metadata is not None:
+            metadata.update(
+                id=photo["id"],
+                title=photo.get("caption"),
+                thumbnail=photo.get("coverUrl"),
+                uploader=(detail.get("author") or {}).get("name"),
+                tags=[item["name"] for item in info.get("tags", []) if item.get("name")],
+            )
+        return path
 
 
 if __name__ == '__main__':

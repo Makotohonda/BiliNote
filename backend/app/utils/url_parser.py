@@ -3,6 +3,17 @@ from typing import Optional
 import requests
 
 
+XIAOHONGSHU_VIDEO_URL = re.compile(
+    r"https?://(?:www\.)?xiaohongshu\.com/(?:explore|discovery/item)/"
+    r"(?P<id>[0-9a-f]{24})/?(?:[?#][^\s]*)?"
+)
+XIAOHONGSHU_SHORT_URL = re.compile(r"https?://xhslink\.com/(?:a|m|o)/[A-Za-z0-9]+/?(?:[?#][^\s]*)?")
+
+
+def is_xiaohongshu_video_url(url: str) -> bool:
+    return bool(XIAOHONGSHU_VIDEO_URL.fullmatch(url) or XIAOHONGSHU_SHORT_URL.fullmatch(url))
+
+
 def extract_video_id(url: str, platform: str) -> Optional[str]:
     """
     从视频链接中提取视频 ID
@@ -31,6 +42,10 @@ def extract_video_id(url: str, platform: str) -> Optional[str]:
         # 匹配 douyin.com/video/1234567890123456789
         match = re.search(r"/video/(\d+)", url)
         return match.group(1) if match else None
+
+    elif platform == "xiaohongshu":
+        match = XIAOHONGSHU_VIDEO_URL.fullmatch(url)
+        return match.group("id") if match else None
 
     return None
 

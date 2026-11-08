@@ -9,12 +9,14 @@ import {
 } from '@/components/ui/form.tsx'
 import { useEffect,useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
+import type { FieldErrors } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 
 import { Info, Loader2, Plus } from 'lucide-react'
 import { Alert, AlertDescription } from '@/components/ui/alert.tsx'
 import { generateNote } from '@/services/note.ts'
+import type { GenerateNoteRequest } from '@/services/note.ts'
 import { uploadFile } from '@/services/upload.ts'
 import { useTaskStore } from '@/store/taskStore'
 import { useModelStore } from '@/store/modelStore'
@@ -199,7 +201,7 @@ const NoteForm = () => {
   ])
 
   /* ---- 帮助函数 ---- */
-  const isGenerating = () => !['SUCCESS', 'FAILED', undefined].includes(getCurrentTask()?.status)
+  const isGenerating = () => !['SUCCESS', 'FAILED', 'FAILD', undefined].includes(getCurrentTask()?.status)
   const generating = isGenerating()
   const handleFileUpload = async (file: File, cb: (url: string) => void) => {
     const formData = new FormData()
@@ -221,12 +223,16 @@ const NoteForm = () => {
   }
 
   const onSubmit = async (values: NoteFormValues) => {
-    console.log('Not even go here')
-    const payload: NoteFormValues = {
+    const model = modelList.find(item => item.model_name === values.model_name)
+    if (!model) {
+      toast.error('提交前检查：请选择一个可用的 AI 模型。')
+      return
+    }
+    const payload: GenerateNoteRequest = {
       ...values,
       video_url:
-        values.platform === 'local' ? values.video_url : withScheme(values.video_url || ''),
-      provider_id: modelList.find(m => m.model_name === values.model_name)!.provider_id,
+        values.platform === 'local' ? values.video_url ?? '' : withScheme(values.video_url || ''),
+      provider_id: model.provider_id,
       task_id: currentTaskId || '',
     }
     if (currentTaskId) {
@@ -245,19 +251,19 @@ const NoteForm = () => {
         const downloading = e?.data?.downloading
         toast.error(
           downloading
-            ? '转写模型正在下载中，请稍候再提交'
-            : '转写模型尚未下载，请先去「音频转写配置」页下载',
+            ? '准备音频转写：模型正在下载，请稍候再提交。'
+            : '准备音频转写：请先在「设置 → 音频转写配置」下载模型。',
         )
         if (!downloading) navigate('/settings/transcriber')
         return
       }
-      // 其余错误：axios 拦截器已经弹过 toast，这里只兜底不让 promise 变成未处理 rejection
-      console.error('提交任务失败：', e)
+      toast.error(`提交任务失败：${e?.msg || '请检查 BiliNote 后端是否可访问。'}`)
     }
   }
   const onInvalid = (errors: FieldErrors<NoteFormValues>) => {
-    console.warn('表单校验失败：', errors)
-    // message.error('请完善所有必填项后再提交')
+    const message = errors.video_url?.message || errors.model_name?.message
+      || Object.values(errors).find(error => typeof error?.message === 'string')?.message
+    toast.error(`提交前检查：${message || '请检查必填项和生成选项。'}`)
   }
   const handleCreateNew = () => {
     // 🔁 这里清空当前任务状态
@@ -297,7 +303,7 @@ const NoteForm = () => {
           <FormButton></FormButton>
 
           {/* 视频链接 & 平台 */}
-          <SectionHeader title="视频链接" tip="支持 B 站、YouTube 等平台" />
+          <SectionHeader title="视频链接" tip="支持 B 站、YouTube、小红书等平台" />
           <div className="flex gap-2">
             {/* 平台选择 */}
 

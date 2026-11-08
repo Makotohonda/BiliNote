@@ -289,6 +289,28 @@ pnpm dev
 
 访问：`http://localhost:3015`
 
+### 获取和配置下载 Cookie
+
+#### 手动获取（Chrome / Edge）
+
+1. 在下表对应的网站登录，打开一条能正常播放的视频。
+2. 打开开发者工具（Mac 按 `⌘ + Option + I`，Windows 按 `Ctrl + Shift + I`），切到 **网络（Network）**，然后刷新视频页。
+3. 在请求列表里点开一个发往下表域名的请求。打开 **标头（Headers）→ 请求标头（Request Headers）**，复制 `cookie` 的完整值。如果当前请求没有这个字段，换一个同域请求，避开图片、视频 CDN 和广告域名。 [Chrome 开发者工具文档](https://developer.chrome.com/docs/devtools/network/reference/#headers)
+4. 回到 BiliNote，打开 **设置 → 下载配置 → 对应平台**，把复制的值粘贴到 **Cookie** 输入框并保存。填写的是 `name=value; name2=value2` 这一行，省略 `Cookie:` 前缀。哔哩哔哩和抖音保存后需重启 BiliNote 后端，再提交任务。
+
+| 平台 | 登录和取值的位置 | 使用说明 |
+| --- | --- | --- |
+| 哔哩哔哩 | [bilibili.com](https://www.bilibili.com/)，查看 `www.bilibili.com` 或 `api.bilibili.com` 的请求 | 如果要获取需要登录的 AI 字幕，确认复制的值里包含 `SESSDATA`。 |
+| 抖音 | [douyin.com](https://www.douyin.com/)，查看 `www.douyin.com` 的请求 | 分享短链跳转后，在视频页取值。 |
+| 快手 | [kuaishou.com](https://www.kuaishou.com/)，查看 `www.kuaishou.com` 的请求 | 优先查看视频页发往 `www.kuaishou.com/graphql` 的请求。 |
+| 小红书 | [xiaohongshu.com](https://www.xiaohongshu.com/)，查看 `www.xiaohongshu.com` 的请求 | 从短链跳转后的视频页取值。提交视频链接时，保留原分享链接上的查询参数。 |
+| YouTube | [youtube.com](https://www.youtube.com/) | 当前 YouTube 下载器未读取这个表单保存的 Cookie，可以跳过。 |
+| 本地视频 | 无需登录网站 | 直接上传视频文件即可。 |
+
+已安装 BiliNote 浏览器插件时，也可以在插件的 **下载配置** 中，给哔哩哔哩、抖音或快手点 **从浏览器同步**。小红书请使用上面的手动步骤。
+
+如果下载提示需要登录，先确认视频在网页登录后可以播放，再重新复制 Cookie 并保存。Cookie 可用于访问你的登录会话，只填到自己管理的 BiliNote 实例。分享截图、日志或配置文件前，先检查并去掉 Cookie。
+
 ## ⚙️ 依赖说明
 
 ### 🎬 FFmpeg

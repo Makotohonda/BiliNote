@@ -209,6 +209,7 @@ def _check_mlx_whisper_model_exists(model_size: str) -> bool:
 @router.get("/transcriber_models_status")
 def get_transcriber_models_status():
     """返回所有 whisper 模型的下载状态（含用户自定义模型）。"""
+    from app.transcriber.transcriber_provider import MLX_WHISPER_AVAILABLE
     from app.transcriber.whisper_models import get_registry
     statuses = []
     for size in get_registry().visible_model_names():
@@ -216,7 +217,7 @@ def get_transcriber_models_status():
         statuses.append(dl_state.status_row(size, downloaded))
 
     # 也检查 mlx-whisper（仅 macOS）
-    mlx_available = platform.system() == "Darwin"
+    mlx_available = MLX_WHISPER_AVAILABLE
     mlx_statuses = []
     if mlx_available:
         from app.transcriber.mlx_whisper_transcriber import MLX_MODEL_MAP

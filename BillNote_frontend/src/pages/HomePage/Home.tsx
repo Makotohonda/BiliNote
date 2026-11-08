@@ -4,6 +4,8 @@ import NoteForm from '@/pages/HomePage/components/NoteForm.tsx'
 import MarkdownViewer from '@/pages/HomePage/components/MarkdownViewer.tsx'
 import { useTaskStore } from '@/store/taskStore'
 import History from '@/pages/HomePage/components/History.tsx'
+import ManualAnnotations from '@/pages/HomePage/components/ManualAnnotations.tsx'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 type ViewStatus = 'idle' | 'loading' | 'success' | 'failed'
 export const HomePage: FC = () => {
   const tasks = useTaskStore(state => state.tasks)
@@ -12,15 +14,15 @@ export const HomePage: FC = () => {
   const currentTask = tasks.find(t => t.id === currentTaskId)
 
   const [status, setStatus] = useState<ViewStatus>('idle')
-
-  const content = currentTask?.markdown || ''
+  const [previewTab, setPreviewTab] = useState('ai')
+  const [manualOpened, setManualOpened] = useState(false)
 
   useEffect(() => {
     if (!currentTask) {
       setStatus('idle')
     } else if (currentTask.status === 'SUCCESS') {
       setStatus('success')
-    } else if (currentTask.status === 'FAILED') {
+    } else if (currentTask.status === 'FAILED' || currentTask.status === 'FAILD') {
       setStatus('failed')
     } else {
       // PENDING、PARSING、DOWNLOADING、TRANSCRIBING、SUMMARIZING 等所有进行中状态
@@ -37,7 +39,23 @@ export const HomePage: FC = () => {
   return (
     <HomeLayout
       NoteForm={<NoteForm />}
-      Preview={<MarkdownViewer status={status} />}
+      Preview={(
+        <Tabs className="h-full min-h-0" value={previewTab} onValueChange={value => {
+          setPreviewTab(value)
+          if (value === 'manual') setManualOpened(true)
+        }}>
+          <TabsList className="shrink-0" aria-label="笔记视图">
+            <TabsTrigger value="ai">AI 笔记</TabsTrigger>
+            <TabsTrigger value="manual">手动批注</TabsTrigger>
+          </TabsList>
+          <TabsContent value="ai" forceMount className="min-h-0 data-[state=inactive]:hidden">
+            <MarkdownViewer status={status} />
+          </TabsContent>
+          <TabsContent value="manual" forceMount className="min-h-0 data-[state=inactive]:hidden">
+            {manualOpened && <ManualAnnotations active={previewTab === 'manual'} />}
+          </TabsContent>
+        </Tabs>
+      )}
       History={<History />}
     />
   )

@@ -87,6 +87,7 @@ class YoutubeDownloader(Downloader, ABC):
         self,
         video_url: str,
         output_dir: Union[str, None] = None,
+        metadata: dict | None = None,
     ) -> str:
         """
         下载视频，返回视频文件路径
@@ -102,7 +103,7 @@ class YoutubeDownloader(Downloader, ABC):
 
         ydl_opts = {
             **YDL_RETRY_OPTS,
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
+            'format': 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b',
             'outtmpl': output_path,
             'noplaylist': True,
             'quiet': False,
@@ -112,8 +113,9 @@ class YoutubeDownloader(Downloader, ABC):
         _apply_proxy(ydl_opts)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=True)
-            video_id = info.get("id")
-            video_path = os.path.join(output_dir, f"{video_id}.mp4")
+            if metadata is not None:
+                metadata.update(info)
+            video_path = ydl.prepare_filename(info)
 
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"视频文件未找到: {video_path}")

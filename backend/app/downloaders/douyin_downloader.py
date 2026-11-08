@@ -114,7 +114,6 @@ class DouyinDownloader(Downloader):
         super().__init__()
         self.headers_config = DouyinConfig.HEADERS.copy()
         self.headers_config["Cookie"] = cfm.get('douyin')
-        print(self.headers_config)
         self.proxies_config = DouyinConfig.PROXIES.copy()
         self.ttwid_config = DouyinConfig.TTWID.copy()
         self.ms_token_config = DouyinConfig.MS_TOKEN.copy()
@@ -125,6 +124,9 @@ class DouyinDownloader(Downloader):
         return url
 
     def extract_video_id(self, url: str) -> str:
+        direct = re.fullmatch(r"https?://(?:www\.)?douyin\.com/video/(\d+)/?(?:[?#].*)?", url)
+        if direct:
+            return direct[1]
         video_url = self.find_url(url)
 
         if len(video_url):
@@ -258,40 +260,30 @@ class DouyinDownloader(Downloader):
         except Exception as e:
             raise e
 
-    def download_video(self, video_url: str, output_dir: Union[str, None] = None) -> str:
+    def download_video(self, video_url: str, output_dir: Union[str, None] = None, metadata: dict | None = None) -> str:
+        output_dir = output_dir or get_data_dir()
+        os.makedirs(output_dir, exist_ok=True)
+        detail = self.fetch_video_info(video_url)['aweme_detail']
+        output_path = os.path.join(output_dir, f"{detail['aweme_id']}.mp4")
+        video = detail['video']
 
-        try:
+        if not os.path.isfile(output_path):
+            url = (video.get('play_addr') or video['download_addr'])['url_list'][0]
+            headers = {'User-Agent': self.headers_config['User-Agent'], 'Referer': 'https://www.douyin.com/'}
+            with requests.get(url, stream=True, headers=headers, timeout=30) as response:
+                response.raise_for_status()
+                with open(output_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        f.write(chunk)
 
-            if output_dir is None:
-                output_dir = get_data_dir()
-            if not output_dir:
-                output_dir = self.cache_data
-            os.makedirs(output_dir, exist_ok=True)
-
-            video_id = self.extract_video_id(video_url)
-            video_path = os.path.join(output_dir, f"{video_id}.mp4")
-            if os.path.exists(video_path):
-                return video_path
-
-
-            output_path = os.path.join(output_dir, "%(id)s.%(ext)s")
-
-            video_data = self.fetch_video_info(video_url)
-            output_path = output_path % {
-                "id": video_data['aweme_detail']['aweme_id'],
-                "ext": "mp4",
-            }
-
-            url=video_data['aweme_detail']['video']['download_addr']['url_list'][0]
-            _data = requests.get(url,allow_redirects=True,headers=self.headers_config)
-
-            with open(output_path, 'wb') as f:
-                f.write(_data.content)
-
-            return output_path
-        except Exception as e:
-            print("请求失败:", e)
-            raise ValueError("请求失败:", e)
+        if metadata is not None:
+            metadata.update(
+                id=detail['aweme_id'],
+                title=detail.get('item_title') or detail.get('caption'),
+                thumbnail=next(iter((video.get('cover') or {}).get('url_list', [])), None),
+                tags=[item['tag_name'] for item in (detail.get('video_tag') or []) if item.get('tag_name')],
+            )
+        return output_path
 
 
 

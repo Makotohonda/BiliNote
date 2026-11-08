@@ -1,59 +1,53 @@
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 import { useTaskStore } from '@/store/taskStore'
 import { get_task_status } from '@/services/note.ts'
 import toast from 'react-hot-toast'
 
 export const useTaskPolling = (interval = 3000) => {
-  const tasks = useTaskStore(state => state.tasks)
-  const updateTaskContent = useTaskStore(state => state.updateTaskContent)
-  const updateTaskStatus = useTaskStore(state => state.updateTaskStatus)
-  const removeTask = useTaskStore(state => state.removeTask)
-
-  const tasksRef = useRef(tasks)
-
-  // 每次 tasks 更新，把最新的 tasks 同步进去
   useEffect(() => {
-    tasksRef.current = tasks
-  }, [tasks])
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout>
+    const { updateTaskContent } = useTaskStore.getState()
 
-  useEffect(() => {
-    const timer = setInterval(async () => {
-      const pendingTasks = tasksRef.current.filter(
-        task => task.status != 'SUCCESS' && task.status != 'FAILED'
+    const poll = async () => {
+      const pendingTasks = useTaskStore.getState().tasks.filter(
+        task => !['SUCCESS', 'FAILED', 'FAILD'].includes(task.status),
       )
+      try {
+        for (const task of pendingTasks) {
+          if (stopped) return
+          try {
+            const { status, message, result } = await get_task_status(task.id)
+            if (stopped) return
 
-      // 无活跃任务时跳过轮询
-      if (pendingTasks.length === 0) return
-
-      for (const task of pendingTasks) {
-        try {
-          const res = await get_task_status(task.id)
-          const { status } = res
-
-          if (status && status !== task.status) {
-            if (status === 'SUCCESS') {
-              const { markdown, transcript, audio_meta } = res.result
+            if (status === 'SUCCESS' && result) {
+              const { markdown, transcript, audio_meta } = result
+              updateTaskContent(task.id, { status, markdown, transcript, audioMeta: audio_meta, pollError: undefined })
               toast.success('笔记生成成功')
-              updateTaskContent(task.id, {
-                status,
-                markdown,
-                transcript,
-                audioMeta: audio_meta,
-              })
             } else if (status === 'FAILED') {
-              updateTaskContent(task.id, { status })
-              console.warn(`⚠️ 任务 ${task.id} 失败`)
-            } else {
-              updateTaskContent(task.id, { status })
+              const failureMessage = message || '生成任务失败，后端未返回具体原因。'
+              updateTaskContent(task.id, { status, failureMessage, pollError: undefined })
+              toast.error(failureMessage)
+            } else if (status !== 'SUCCESS' && (status !== task.status || task.pollError)) {
+              updateTaskContent(task.id, { status, pollError: undefined })
+            }
+          } catch {
+            if (!stopped && !task.pollError) {
+              updateTaskContent(task.id, {
+                pollError: '暂时无法查询任务状态。请检查后端连接，页面会自动重试。',
+              })
             }
           }
-        } catch (e) {
-          console.error('❌ 任务轮询失败：', e)
-          updateTaskContent(task.id, { status: 'FAILED' })
         }
+      } finally {
+        if (!stopped) timer = setTimeout(poll, interval)
       }
-    }, interval)
+    }
 
-    return () => clearInterval(timer)
+    timer = setTimeout(poll, interval)
+    return () => {
+      stopped = true
+      clearTimeout(timer)
+    }
   }, [interval])
 }

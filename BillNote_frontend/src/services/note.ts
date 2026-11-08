@@ -1,45 +1,36 @@
 import request from '@/utils/request'
+import type { IResponse } from '@/utils/request'
+import type { AudioMeta, TaskStatus, Transcript } from '@/store/taskStore'
 import toast from 'react-hot-toast'
 
-export const generateNote = async (data: {
+export interface GenerateNoteRequest {
   video_url: string
   platform: string
   quality: string
   model_name: string
   provider_id: string
+  link?: boolean
+  screenshot?: boolean
   task_id?: string
-  format: Array<string>
-  style: string
+  format?: string[]
+  style?: string
   extras?: string
-  video_understand?: boolean
+  video_understanding?: boolean
   video_interval?: number
-  grid_size: Array<number>
-}) => {
-  try {
-    console.log('generateNote', data)
-    const response = await request.post('/generate_note', data)
-
-    if (!response) {
-      if (response.data.msg) {
-        toast.error(response.data.msg)
-      }
-      return null
-    }
-    toast.success('笔记生成任务已提交！')
-
-    console.log('res', response)
-    // 成功提示
-
-    return response
-  } catch (e: any) {
-    console.error('❌ 请求出错', e)
-
-    // 错误提示
-    // toast.error('笔记生成失败，请稍后重试')
-
-    throw e // 抛出错误以便调用方处理
-  }
+  grid_size?: [number, number]
 }
+
+export const generateNote = async (data: GenerateNoteRequest) => {
+  const response = await request.post<unknown, { task_id: string }>('/generate_note', data, { suppressToast: true })
+  toast.success('笔记生成任务已提交！')
+  return response
+}
+
+export const downloadAnnotationVideo = (video_url: string, platform?: string) =>
+  request.post<unknown, { playback_url: string; title: string }>('/annotation_video/download', { video_url, platform }, {
+    timeout: 0,
+    suppressToast: true,
+  })
 
 export const delete_task = async ({ video_id, platform }) => {
   try {
@@ -59,17 +50,20 @@ export const delete_task = async ({ video_id, platform }) => {
   }
 }
 
-export const get_task_status = async (task_id: string) => {
+interface TaskStatusResult {
+  status: TaskStatus
+  message?: string
+  result?: { markdown: string; transcript: Transcript; audio_meta: AudioMeta }
+}
+
+export const get_task_status = async (task_id: string): Promise<TaskStatusResult> => {
   try {
-    // 成功提示
-
-    return await request.get('/task_status/' + task_id)
-  } catch (e) {
-    console.error('❌ 请求出错', e)
-
-    // 错误提示
-    toast.error('笔记生成失败，请稍后重试')
-
-    throw e // 抛出错误以便调用方处理
+    return await request.get<unknown, TaskStatusResult>('/task_status/' + task_id, { suppressToast: true })
+  } catch (error) {
+    const failure = error as IResponse<TaskStatusResult | null> | undefined
+    if (failure?.code === 500 && (failure.data?.status === 'FAILED' || failure.data === null)) {
+      return { status: 'FAILED', message: failure.msg }
+    }
+    throw error
   }
 }
